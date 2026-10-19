@@ -1,0 +1,1 @@
+{"name":"instagram-news-carousel-automation","version":"1.0.0","private":true,"type":"module","scripts":{"run":"node src/daily-job.js","check":"node --check src/daily-job.js && node --check src/news.js && node --check src/carousel.js && node --check src/instagram.js"},"dependencies":{"better-sqlite3":"^12.4.1","dotenv":"^16.6.1","playwright":"^1.55.0","rss-parser":"^3.13.0"}}

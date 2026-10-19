@@ -1,0 +1,33 @@
+name: Daily Instagram News Carousel
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 18 * * *"
+      timezone: "Asia/Kolkata"
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install
+      - run: npx playwright install --with-deps chromium
+      - name: Generate carousel (dry-run)
+        env:
+          NEWS_FEEDS: ${{ secrets.NEWS_FEEDS }}
+          NEWS_LIMIT: "5"
+          PUBLISH_TO_INSTAGRAM: "false"
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: npm run run
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: instagram-news-carousel
+          path: output/
+          if-no-files-found: ignore
+          retention-days: 7
