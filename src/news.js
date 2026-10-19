@@ -9,6 +9,9 @@ export async function collectNews(limit = 5) {
   for (const feedUrl of feeds) {
     try {
       const feed = await parser.parseURL(feedUrl);
+      if (feeds.length === 0) {
+  throw new Error("NEWS_FEEDS is empty. Configure the NEWS_FEEDS GitHub repository secret.");
+}
       for (const item of feed.items || []) {
         const title = (item.title || "").trim(), url = item.link || item.guid;
         if (!title || !url || !/^https?:\/\//i.test(url)) continue;
