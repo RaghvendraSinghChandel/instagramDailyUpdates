@@ -3,8 +3,15 @@ import Parser from "rss-parser";
 import crypto from "node:crypto";
 
 const parser = new Parser({
-  timeout: 12000,
-  headers: { "User-Agent": "NewsCarouselBot/1.0" }
+  timeout: 15000,
+  headers: { "User-Agent": "IndiaDailyNewsBot/1.0" },
+  customFields: {
+    item: [
+      ["media:content", "mediaContent", { keepArray: true }],
+      ["media:thumbnail", "mediaThumbnail", { keepArray: true }],
+      ["content:encoded", "contentEncoded"]
+    ]
+  }
 });
 
 const normalize = value =>
@@ -14,72 +21,158 @@ const normalize = value =>
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim();
 
-const tokenize = value =>
-  new Set(
-    normalize(value)
-      .split(/\s+/)
-      .filter(word => word.length > 2)
+function extractImage(item) {
+  const candidates = [];
+
+  if (item.enclosure?.url) {
+    candidates.push(item.enclosure.url);
+  }
+
+  for (const media of item.mediaContent || []) {
+    if (media?.$?.url) candidates.push(media.$.url);
+    if (media?.url) candidates.push(media.url);
+  }
+
+  for (const media of item.mediaThumbnail || []) {
+    if (media?.$?.url) candidates.push(media.$.url);
+    if (media?.url) candidates.push(media.url);
+  }
+
+  const html = [
+    item.content,
+    item.contentEncoded,
+    item.description,
+    item.summary
+  ].filter(Boolean).join(" ");
+
+  const imageMatches = html.matchAll(
+    /<img\b[^>]*\bsrc=["']([^"']+)["']/gi
   );
 
-function similarity(a, b) {
-  const first = tokenize(a);
-  const second = tokenize(b);
+  for (const match of imageMatches) {
+    candidates.push(match[1]);
+  }
 
-  if (!first.size || !second.size) return 0;
+  return candidates.find(value => {
+    if (typeof value !== "string") return false;
 
-  const common = [...first].filter(word => second.has(word)).length;
-  return common / (first.size + second.size - common);
+    try {
+      return new URL(value).protocol === "https:";
+    } catch {
+      return false;
+    }
+  }) || "";
 }
 
-function isSameStory(a, b) {
-  if (normalize(a.title) === normalize(b.title)) return true;
-
-  // Conservative headline matching to avoid merging unrelated stories.
-  return similarity(a.title, b.title) >= 0.65;
-}
-
-function recencyScore(publishedAt) {
+function getRecencyScore(publishedAt) {
   const timestamp = Date.parse(publishedAt || "");
 
   if (!Number.isFinite(timestamp)) return 0;
 
-  const ageHours = Math.max(0, (Date.now() - timestamp) / 3600000);
+  const hours = (Date.now() - timestamp) / 3600000;
 
-  if (ageHours <= 3) return 30;
-  if (ageHours <= 12) return 24;
-  if (ageHours <= 24) return 18;
-  if (ageHours <= 48) return 10;
-  if (ageHours <= 72) return 4;
+  if (hours < 0) return 0;
+  if (hours <= 3) return 30;
+  if (hours <= 12) return 24;
+  if (hours <= 24) return 18;
+  if (hours <= 48) return 10;
+  if (hours <= 72) return 4;
 
   return 0;
+}
+
+function similarity(a, b) {
+  const wordsA = new Set(normalize(a).split(" ").filter(Boolean));
+  const wordsB = new Set(normalize(b).split(" ").filter(Boolean));
+
+  if (!wordsA.size || !wordsB.size) return 0;
+
+  const intersection = [...wordsA].filter(word => wordsB.has(word)).length;
+  const union = new Set([...wordsA, ...wordsB]).size;
+
+  return union ? intersection / union : 0;
+}
+
+function groupRelatedStories(stories) {
+  const groups = [];
+
+  for (const story of stories) {
+    const group = groups.find(existing =>
+      similarity(existing.title, story.title) >= 0.55
+    );
+
+    if (group) {
+      group.related.push(story);
+    } else {
+      groups.push({
+        title: story.title,
+        related: [story]
+      });
+    }
+  }
+
+  return groups.map(group => {
+    const related = group.related.sort((a, b) =>
+      (Date.parse(b.publishedAt || "") || 0) -
+      (Date.parse(a.publishedAt || "") || 0)
+    );
+
+    const representative = related[0];
+    const sources = [
+      ...new Set(related.map(story => story.source).filter(Boolean))
+    ];
+
+    // Prefer an available image from any related article.
+    const imageStory = related.find(story => story.imageUrl);
+
+    return {
+      ...representative,
+      imageUrl: imageStory?.imageUrl || "",
+      coverageCount: sources.length,
+      sourceLinks: related.map(story => ({
+        source: story.source,
+        url: story.url
+      }))
+    };
+  });
+}
+
+function scoreStory(story) {
+  const coverage = Math.min(story.coverageCount || 1, 5) * 12;
+  const trending = story.trending ? 25 : 0;
+
+  return coverage + trending + getRecencyScore(story.publishedAt);
 }
 
 async function readFeed(feedUrl, trending = false) {
   try {
     const feed = await parser.parseURL(feedUrl);
+    const defaultSource = new URL(feedUrl).hostname.replace(/^www\./, "");
 
     return (feed.items || []).flatMap(item => {
       const title = (item.title || "").trim();
       const url = item.link || item.guid;
 
-      if (!title || !url || !/^https?:\/\//i.test(url)) return [];
+      if (!title || !url || !/^https?:\/\//i.test(url)) {
+        return [];
+      }
 
       const publishedAt = item.isoDate || item.pubDate || "";
 
       return [{
-        id: crypto.createHash("sha256")
+        id: crypto
+          .createHash("sha256")
           .update(normalize(title))
           .digest("hex"),
         title,
         url,
-        source: feed.title || new URL(feedUrl).hostname,
+        source: feed.title || defaultSource,
         publishedAt,
-        summary: (item.contentSnippet || item.summary || "")
-          .replace(/\s+/g, " ")
-          .slice(0, 500),
-        trending,
-        popularityScore: 0,
-        coverageCount: 1
+        summary: String(
+          item.contentSnippet || item.summary || item.description || ""
+        ).replace(/\s+/g, " ").slice(0, 500),
+        imageUrl: extractImage(item),
+        trending
       }];
     });
   } catch (error) {
@@ -88,70 +181,17 @@ async function readFeed(feedUrl, trending = false) {
   }
 }
 
-function groupRelatedStories(stories) {
-  const groups = [];
+export async function collectNews(limit = 9) {
+  const feeds = (process.env.NEWS_FEEDS || "")
+    .split(",").map(value => value.trim()).filter(Boolean);
 
-  // Prefer recent stories when choosing the representative headline.
-  const ordered = [...stories].sort(
-    (a, b) => Date.parse(b.publishedAt || 0) -
-              Date.parse(a.publishedAt || 0)
-  );
+  const trendingFeeds = (process.env.TRENDING_FEEDS || "")
+    .split(",").map(value => value.trim()).filter(Boolean);
 
-  for (const story of ordered) {
-    const group = groups.find(existing =>
-      isSameStory(existing[0], story)
+  if (!feeds.length && !trendingFeeds.length) {
+    throw new Error(
+      "No news feeds configured. Set NEWS_FEEDS or TRENDING_FEEDS."
     );
-
-    if (group) {
-      group.push(story);
-    } else {
-      groups.push([story]);
-    }
-  }
-
-  return groups.map(group => {
-    const representative = { ...group[0] };
-    const uniqueSources = new Set(group.map(item => item.source));
-
-    representative.coverageCount = uniqueSources.size;
-    representative.trending = group.some(item => item.trending);
-    representative.sourceLinks = [
-      ...new Set(group.map(item => item.url))
-    ];
-
-    return representative;
-  });
-}
-
-function scoreStory(story) {
-  const sourceScore = Math.min(story.coverageCount, 5) * 12;
-  const trendingScore = story.trending ? 25 : 0;
-  const freshnessScore = recencyScore(story.publishedAt);
-
-  // Maximum is approximately 115 points.
-  return sourceScore + trendingScore + freshnessScore;
-}
-
-export async function collectNews(limit = 5) {
-  const feeds = (process.env.NEWS_FEEDS || "").split(",").map(s => s.trim()).filter(Boolean);
-  const stories = [];
-  for (const feedUrl of feeds) {
-    try {
-      const feed = await parser.parseURL(feedUrl);
-      if (feeds.length === 0) {
-  throw new Error("NEWS_FEEDS is empty. Configure the NEWS_FEEDS GitHub repository secret.");
-}
-      for (const item of feed.items || []) {
-        const title = (item.title || "").trim(), url = item.link || item.guid;
-        if (!title || !url || !/^https?:\/\//i.test(url)) continue;
-        stories.push({
-          id: crypto.createHash("sha256").update(normalize(title)).digest("hex"),
-          title, url, source: feed.title || new URL(feedUrl).hostname,
-          publishedAt: item.isoDate || item.pubDate || "",
-          summary: (item.contentSnippet || item.summary || "").replace(/\s+/g, " ").slice(0, 500)
-        });
-      }
-    } catch (e) { console.warn(`Feed failed: ${feedUrl} — ${e.message}`); }
   }
 
   const [newsResults, trendingResults] = await Promise.all([
@@ -160,12 +200,14 @@ export async function collectNews(limit = 5) {
   ]);
 
   const candidates = [...newsResults, ...trendingResults].flat();
-
-  // Remove duplicate URLs before clustering similar headlines.
   const uniqueUrls = new Set();
+
   const uniqueStories = candidates.filter(story => {
-    if (uniqueUrls.has(story.url)) return false;
-    uniqueUrls.add(story.url);
+    const url = story.url.replace(/\/+$/, "");
+
+    if (uniqueUrls.has(url)) return false;
+
+    uniqueUrls.add(url);
     return true;
   });
 
@@ -178,8 +220,8 @@ export async function collectNews(limit = 5) {
     }))
     .sort((a, b) =>
       b.popularityScore - a.popularityScore ||
-      Date.parse(b.publishedAt || 0) -
-      Date.parse(a.publishedAt || 0)
+      (Date.parse(b.publishedAt || "") || 0) -
+      (Date.parse(a.publishedAt || "") || 0)
     )
     .slice(0, limit);
 }
