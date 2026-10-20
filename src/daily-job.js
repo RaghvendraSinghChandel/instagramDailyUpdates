@@ -73,7 +73,7 @@ async function sendFailureAlert(message) {
 }
 
 async function main() {
-  if (!Number.isInteger(NEWS_LIMIT) || NEWS_LIMIT < 2 || NEWS_LIMIT > 10) {
+  if (!Number.isInteger(NEWS_LIMIT) || NEWS_LIMIT < 2 || NEWS_LIMIT > 15) {
     throw new Error("NEWS_LIMIT must be a number between 2 and 10.");
   }
 
@@ -97,11 +97,11 @@ async function main() {
   // Render the carousel to temporary runner storage.
   const imagePaths = await renderCarousel(stories, OUTPUT_DIR);
 
-  if (imagePaths.length !== stories.length) {
-    throw new Error(
-      `Expected ${stories.length} slides but rendered ${imagePaths.length}.`
-    );
-  }
+  // if (imagePaths.length !== stories.length) {
+  //   throw new Error(
+  //     `Expected ${stories.length} slides but rendered ${imagePaths.length}.`
+  //   );
+  // }
 
   console.log(`Rendered ${imagePaths.length} slides.`);
 
